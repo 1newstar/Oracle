@@ -48,14 +48,6 @@ v_result as
       on (t1.user_id = t2.user_id)
    inner join v_root_region t3
       on (t1.region_id = t3.region_id))
-/*select v.root_region_name,
-       v.ldate,
-       v.user_id,
-       count(*) over(partition by v.root_region_name, v.ldate) "登陆总次数" \*,
-       row_number() over(partition by v.root_region_name, v.ldate, v.user_id order by 1) "登陆总人数"*\
-  from v_result v
- order by 1, 2, 3*/
-
 select root_region_name,
        ldate,
        count(*) "登陆总次数",
@@ -85,7 +77,7 @@ select distinct v.root_region_name,
                 count(*) over(partition by v.root_region_name, v.ldate) "登陆总次数",
                 count(distinct user_id) over(partition by v.root_region_name, v.ldate) "登陆总人数"
   from v_result v
- order by 1, 2, 3
+ order by 1, 2
 
 
 

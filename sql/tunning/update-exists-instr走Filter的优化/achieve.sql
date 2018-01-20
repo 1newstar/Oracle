@@ -51,7 +51,22 @@ Note
 这样test1有多少条记录, test2表就会被执行多少次全表扫描.
 你那里两张表都是20W的数据量, 相当于执行20W次20W数据量的表的全表扫描 这样不死才怪
 
+-------------------第一种方式, 由于访问的列都比较少, 建立索引,或者组合索引, 让其走IFFS加并行.
+在test1/test2表的object_name都建立索引 
+create index IDX_TEST1_ONAME on TEST1 (OBJECT_NAME)
+create index IDX_TEST2_ONAME on TEST2 (OBJECT_NAME)
 
+  alter index IDX_TEST1_ONAME storage(buffer_pool keep);
+alter index IDX_TEST2_ONAME storage(buffer_pool keep);
+
+  update /*+ parallel(a 8) index_ffs(a IDX_TEST1_ONAME) */ test1 a
+   set owner = '是'
+ where exists
+ (select /*+ parallel(b 8) index_ffs(b IDX_TEST2_ONAME) */ from test2 b where instr(a.object_name, b.object_name) > 0);
+
+
+
+-------------------第二种方式, PL/SQL
 
 我们先用查询语句的方式来看这个 update 语句
 
@@ -116,6 +131,8 @@ Done in 233.393 seconds
 我这里test1表7W多的数据量, 我拆分成8个部分[根据机器性能和数据量来决定分成多少部分吧], 每个部分执行1W条
 只需要该for 游标里面的分页参数即可..然后分别到8个sqlplus中执行, 我这里用时不到20秒就搞定了...
 
+set timing on;
+set serveroutput on;
 declare
   -- 这个用来记录循环每次查询出的结果数量, 如果为1, 表示查询到数据, 为0表是没有查询到匹配的数据
   v_cnt pls_integer default 0;

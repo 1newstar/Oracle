@@ -214,4 +214,4 @@ select b.dept, sum(a.day_worktime) / count(distinct a.id) staff_cnt / 30
           from t_worktime x) a
  inner join t_staffer b
     on (a.id = b.id)
- group by b.dept
+ group by b.dept;

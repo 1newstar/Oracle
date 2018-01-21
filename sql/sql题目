@@ -1,6 +1,29 @@
 http://bbs.csdn.net/topics/392303438
 商品图片显示 SQL语句
+-- 解决方案
+with v as
+ (select t.*, row_number() over(partition by t.shopid order by t.status) rn
+    from t_shop t)
+select v.shopid,
+       max(decode(v.rn, 1, v.image_url)) image_url_1,
+       '0' status_1,
+       max(decode(v.rn, 2, v.image_url)) image_url_2,
+       '1' status_2
+  from v
+ group by v.shopid;
 
+-- 11g 特有pivot函数
+with v as
+ (select shopid,
+         image_url,
+         row_number() over(partition by t.shopid order by t.status) rn
+    from t_shop t)
+select v1.shopid,
+       v1."1_IMAGE_URL",
+       '0' status_1,
+       v1."2_IMAGE_URL",
+       '1' status_2
+  from (select * from v pivot(max(v.image_url) as image_url for rn in(1, 2))) v1;
 
 
 

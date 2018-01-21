@@ -90,6 +90,9 @@ create procedure proc_analysis_incorrect_kq as
   v_final_outtime     date := to_date(v_final_date_prefix || ' 18:00',
                                       'yyyyMMdd hh24:mi');
 begin
+
+-- 这里最好是分为两个for循环进行处理， 分别对 主SQL再添加过滤条件 status <> 0 表示迟到的  lost_range_mark <> 0 表示缺勤的
+-- 这里我偷懒就只写一个了
   for r in (with v_base as
                (select t.*,
                       lead(daynumber, 1, daynumber) over(partition by t.id order by t.daynumber) next_daynumber,

@@ -1,15 +1,18 @@
-create table t_staffer(
-  id int,
-  name varchar2(50),
-  age int,
-  dept varchar2(20)
-
+-- Create table
+create table T_STAFFER
+(
+  id   INTEGER,
+  name VARCHAR2(50),
+  age  INTEGER,
+  dept VARCHAR2(20)
 );
 
 
-create table t_worktime(
-       id int,
-       intime varchar2(50),
-       outtime varchar2(50),
-       daynumber int
+-- Create table
+create table T_WORKTIME
+(
+  id        INTEGER,
+  intime    VARCHAR2(20),
+  outtime   VARCHAR2(20),
+  daynumber INTEGER
 );

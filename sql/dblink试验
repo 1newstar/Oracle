@@ -1,0 +1,24 @@
+IPSUAT 库
+	select * from t_b_adviser_subscribe@SPA_LINK  
+
+
+PA18 UAT库
+	select * from t_b_adviser_subscribe;
+	select * from t_b_tg_gift_package;
+	select * from t_b_agreemessagelevel;
+
+
+
+
+
+select count(*) from T_B_ADVISER_SUBSCRIBE@SPA_LINK where 1=0
+select count(*) from T_B_CLIENT_PRODUCT_RISK@SPA_LINK where 1=0
+select count(*) from T_B_AGREEMESSAGELEVEL@SPA_LINK where 1=0
+select count(*) from T_B_TG_PRODUCT_OPT_LOG@SPA_LINK where 1=0
+select count(*) from T_B_TG_USER_PRO_REMIND@SPA_LINK where 1=0
+select count(*) from T_B_TG_GIFT_PACKAGE@SPA_LINK where 1=0
+select count(*) from T_B_TG_RECOMMEND_INFO@SPA_LINK where 1=0
+select count(*) from T_B_ADVISER_PRODUCT@SPA_LINK where 1=0
+select count(*) from TABLE_PRIVILEGE_MAP@SPA_LINK where 1=0
+select count(*) from T_B_FOLLOW_USER_TRADE@SPA_LINK where 1=0
+	

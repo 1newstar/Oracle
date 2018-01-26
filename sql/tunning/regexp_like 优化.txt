@@ -1,0 +1,282 @@
+
+declare
+  isMatch Boolean := false;
+  dealPnCnt   number(10) := 0;
+begin
+  for c_no_data in (select nbn.no, 69 as partition_id
+  from TMP_NBR_NO_LEVEL nbn
+ where nbn.level_id=1 and length(nbn.no)= 8 ) loop
+     dealPnCnt := dealPnCnt + 1;
+    for c_data in (select nli.*, nl.nbr_level_id
+                          from tmp_nbr_level_item   nli,
+                               tmp_nbr_level_2_item nl2i,
+                               tmp_nbr_level        nl,
+                               tmp_nbr_spec_2_level ns2l
+                    where nli.nbr_level_item_id = nl2i.nbr_level_item_id
+                      and nl2i.nbr_level_id = nl.nbr_level_id
+                      and nl.nbr_level_id = ns2l.nbr_level_id
+                      and ns2l.area_id = c_no_data.partition_id
+                      and ns2l.res_spec_id = 6039
+                      and ns2l.nbr_level_id between 201 and 208
+                    order by nl2i.priority) loop
+
+      if (regexp_like(c_no_data.no, c_data.expression)) then
+
+         update TMP_NBR_NO_LEVEL n
+            set n.level_id    = c_data.nbr_level_id
+          where n.no = c_no_data.no;
+      
+        exit;
+
+      end if;
+
+    end loop;
+        --分批提交，每5000条提交一次
+        if mod(dealPnCnt, 5000) = 0 then
+          commit;
+        end if;
+    end loop;
+end;
+
+
+TMP_NBR_NO_LEVEL   400多万， 180M,       
+
+(select nli.*, nl.nbr_level_id
+                          from tmp_nbr_level_item   nli,
+                               tmp_nbr_level_2_item nl2i,
+                               tmp_nbr_level        nl,
+                               tmp_nbr_spec_2_level ns2l
+                    where nli.nbr_level_item_id = nl2i.nbr_level_item_id
+                      and nl2i.nbr_level_id = nl.nbr_level_id
+                      and nl.nbr_level_id = ns2l.nbr_level_id
+                      and ns2l.area_id = c_no_data.partition_id
+                      and ns2l.res_spec_id = 6039
+                      and ns2l.nbr_level_id between 201 and 208
+                    order by nl2i.priority)   这个数据量 43 条，  
+
+ 总得来说 类似NL。  大表NL小表。
+
+
+优化难点：    regexp_like(c_no_data.no, c_data.expression)匹配。 数据从字符中like,  而且还是 切割字符串 一个一个字符匹配，  更恶心的是  可能匹配多次。 
+
+ 比如 数据 c_no_data.no:82668999,     和 c_data 中expression匹配3次   expression： \d*(0|6|8|9)\1{2}$， \d*([^4])\1$，  \d*$。 然后根据 priority取一个数据，
+    
+ MD 这个！！，这个！！  一对多关系莫。。。   而且根据我的观察 每条数据 至少配置 2次！！！！     
+
+ 400 多万数据  岂不是需要翻翻？？？  
+
+
+   
+本来就不得不 使用NL了， 现在还要考虑到 一对多，    难怪 原来跑了36h 没有跑完。
+
+
+
+
+ 瓶颈分析出来  着手优化。  首先 没说的      
+        
+   create table TMP_DATE_TEST
+(
+  expression   VARCHAR2(255) not null,
+  nbr_level_id NUMBER(9) not null,
+  priority     NUMBER(8) not null
+);
+   
+  insert into  TMP_DATE_TEST 
+  select  nli.expression, nl.nbr_level_id, priority   from tmp_nbr_level_item   nli,
+                               tmp_nbr_level_2_item nl2i,
+                               tmp_nbr_level        nl,
+                               tmp_nbr_spec_2_level ns2l
+                    where nli.nbr_level_item_id = nl2i.nbr_level_item_id
+                      and nl2i.nbr_level_id = nl.nbr_level_id
+                      and nl.nbr_level_id = ns2l.nbr_level_id
+                      and ns2l.area_id = 69
+                      and ns2l.res_spec_id = 6039
+                      and ns2l.nbr_level_id between 201 and 208; 
+
+    
+ 
+ TMP_NBR_NO_LEVEL  数据如何优化呢？？  执行计划是ＮＬ，那是肯定的了，没办法改成hash, 或者SMJ。   但是这次我用  TMP_DATE_TEST 驱动大表。  TMP_DATE_TEST总得数据量才43条， 
+ 
+    首先我把 这个表的 rowid, 和 no  抽取到临时表中， 在把临时表压入内存中，  从内存中regexp_like  数据，  最终找到   TMP_NBR_NO_LEVEL 的rowid, 
+
+   最后更新数据。  
+
+
+---- 建临时表  
+  create table TMP_NBR_NO_LEVEL_TEXT
+(
+  rid  ROWID,
+  no   VARCHAR2(255),
+  flag NUMBER default 0
+)      
+ 
+---临时表塞入数据 
+  insert into   TMP_NBR_NO_LEVEL_TEXT 
+   select rowid rid,  nbn.no,0    from   TMP_NBR_NO_LEVEL nbn where  nbn.level_id=1 and length(nbn.no)= 8 ;        
+
+
+--- 数据放入内存  简写 
+alter table  TMP_NBR_NO_LEVEL_TEXT  storage(buffer_pool keep)
+
+
+---- 访问临时表  比对数据  然后更新主表数据  
+
+declare
+type rowid_table_type is table of  rowid index  by  pls_integer;  
+  updateCur  sys_refcursor;
+ v_rowid  rowid_table_type;
+
+ v_rowid2  rowid_table_type;
+  
+begin
+  for c_no_data in (   select t.expression, t.nbr_level_id, t.priority  from TMP_DATE_TEST t order by 3 ) 
+    loop
+       open  updateCur  for  select  rid,  rowid     from  TMP_NBR_NO_LEVEL_TEXT nbn where  regexp_like(nbn.no, c_no_data.expression);
+        loop
+          fetch updateCur  bulk collect  into  v_rowid, v_rowid2  LIMIT 20000;
+             forall i in v_rowid.FIRST ..v_rowid.LAST
+              update TMP_NBR_NO_LEVEL  set  level_id = c_no_data.nbr_level_id   where rowid = v_rowid(i) ;  
+               commit; 
+             
+           
+              forall j in v_rowid2.FIRST ..v_rowid2.LAST
+              update  TMP_NBR_NO_LEVEL_TEXT  set  flag = 1  where rowid = v_rowid2(j) ;  
+               commit; 
+          
+                       
+          exit when  updateCur%notfound;
+       end loop; 
+        CLOSE updateCur; 
+    end loop;
+end;
+
+
+ 此方法 能将原来的优化 从36h+  降低到4小时左右。 外话（不知道咋的说到激动的地方，免不了有些啰嗦，有不知道自己在说啥），
+   
+  我肯定不是等到 4小时后 我才知道效率的。 我们优化并不是非要等到结束。 我们可以从 事务视图中可以 看到执行的效率， 判断回滚段使用多少块，来预估执到什么地方。
+
+  从后来的 效果看 预计的4小时 完全 正确！！
+
+
+
+
+ --- 改进方案。 
+
+ 既然 一个SQL 需要跑 4小时， 那我用 8 个SQL跑， 那肯定能控制在  30分钟之内， 实在不行  我16 个SQL跑，   还是不行我来32 个SQL跑。  硬件设备本来就不差
+ 
+ 我们做SQL 优化腰板就是硬！！！
+
+ 但是并行也要有并行的办法， 关键是 并行之间 如何控制锁相互争用。    如果光是业务上区分也不行， 1  比如  一个SQL改 小于5555 的， 一个SQL改大于5555 的
+
+ 关键是  我们不知道 这些数据 存在是否在同一个数据块中（大部分数据相互打散在各个数据块中，此时是堆表）， 很可能此时 整个 表已经扫描了 2次，或者大部分已经扫描2次了。
+
+  
+
+ 那哥是根据数据分区来切割数据表，  DBMS_ROWID.ROWID_CREATE()  函数分析数据表的rowid。
+
+    select  DBMS_ROWID.ROWID_CREATE(1,   c.oid,   e.RELATIVE_FNO,  e.BLOCK_ID, 0) minrid,
+              DBMS_ROWID.ROWID_CREATE(1,  c.oid,  e.RELATIVE_FNO,  e.BLOCK_ID + e.BLOCKS - 1,    10000) maxrid
+         from dba_extents e,
+              (select max(data_object_id) oid
+                 from dba_objects
+                 where object_name = upper('TMP_NBR_NO_LEVEL_TEXT')   and owner = upper('RESCZ2')   and data_object_id is not null) c
+        where e.segment_name = 'TMP_NBR_NO_LEVEL_TEXT'    and e.owner = 'RESCZ2';
+   
+
+  可以获得每个 分区的最大， 最小rowid 来切割数据。  但是此时大惊！！！！ 为啥？ 因为有的数据 3000 多条， 有的30万条， 这样导致切割后 数据严重不均衡， 从而导致每个并行的时间不一致
+
+  这个是不能接受的。  分析发现 原来 每个 extents 的分配的数据块不一致造成的。  
+
+  
+ 于是 建表空间   
+    create tablespace TBS_BSS_FIXED  datafile '/oradata/osstest2/tbs_bss_fixed_500.dbf' size XXXM 
+    extent management local uniform size 128k;   每次增长 128K，  然后在搞表。 搞好后发现每个extents  都是16 个数据块，  （此类搞法哥建议是搞1M的）
+
+   TMP_NBR_NO_LEVEL_TEXT  把表放入  次表空间中。
+  
+ 其实每次切表的时候， 我都不会搞特定的表空间的，   但是这次情况特殊。   
+
+
+
+ create table RID_TABLE
+(
+  rowno  NUMBER,
+  minrid VARCHAR2(18),
+  maxrid VARCHAR2(18)
+) ;  
+
+
+ insert into   rid_table 
+       select rownum rowno,
+              DBMS_ROWID.ROWID_CREATE(1,   c.oid,   e.RELATIVE_FNO,  e.BLOCK_ID, 0) minrid,
+              DBMS_ROWID.ROWID_CREATE(1,  c.oid,  e.RELATIVE_FNO,  e.BLOCK_ID + e.BLOCKS - 1,    10000) maxrid
+         from dba_extents e,
+              (select max(data_object_id) oid
+                 from dba_objects
+                 where object_name = upper('TMP_NBR_NO_LEVEL_TEXT')   and owner = upper('RESCZ2')   and data_object_id is not null) c
+        where e.segment_name = 'TMP_NBR_NO_LEVEL_TEXT'    and e.owner = 'RESCZ2';
+  commit; 
+
+测试 rid_table 中每行 指定的 数据量 都很均衡，  4035 条数据， 哈哈哈。。。。 其实我想把表空间 的那个   128k; 改成1024K的， 不过无所谓了。 下次类似的SQL再改吧 
+   
+
+
+最后的脚本  
+
+create or replace  procedure  pro_phone_grade(flag_num in number)
+as 
+ type rowid_table_type is table of  rowid index  by  pls_integer;  
+  updateCur  sys_refcursor;
+ v_rowid  rowid_table_type;
+ v_rowid2  rowid_table_type;
+  
+begin
+
+for  rowid_cur in ( select  *  from  rid_table  where mod(rowno, flag_num)=1 )
+ loop
+    for c_no_data in (   select t.expression, t.nbr_level_id, t.priority  from TMP_DATE_TEST t order by 3 ) 
+       loop
+         open  updateCur  for  select rid,rowid  from TMP_NBR_NO_LEVEL_TEXT  nbn
+           where rowid between rowid_cur.minrid and rowid_cur.maxrid and flag = 0  and regexp_like(nbn.no, c_no_data.expression)  ;
+          loop
+            fetch updateCur  bulk collect  into  v_rowid, v_rowid2  LIMIT 20000;-----limit 20000 无所谓了 哈哈哈.....
+              forall i in v_rowid.FIRST ..v_rowid.LAST
+              update TMP_NBR_NO_LEVEL  set  level_id = c_no_data.nbr_level_id   where rowid = v_rowid(i) ; 
+               commit;    
+               
+                forall i in v_rowid2.FIRST ..v_rowid2.LAST
+                update TMP_NBR_NO_LEVEL_TEXT  set  flag = 1 where rowid = v_rowid2(i) ; 
+               commit;         
+            exit when  updateCur%notfound;
+         end loop; 
+         CLOSE updateCur; 
+       end loop;
+   end loop;
+end;   
+
+
+于是哥 开并行  
+
+begin
+   pro_phone_grade(0);
+end; 
+
+ begin
+   pro_phone_grade(1);
+end; 
+ 
+
+begin
+   pro_phone_grade(2);
+end; 
+
+
+...... 一共 8个....   8 个小兄弟 一起搞 29分钟搞定，     哥要是搞16小兄弟 一起玩预计在 15 分钟，哈哈哈，  可收缩性非常强......   
+
+
+ 此致  优化到此结束，  36h---- 4h ----- 30min    
+ 
+
+
+
+

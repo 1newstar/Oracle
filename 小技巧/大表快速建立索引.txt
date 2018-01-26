@@ -1,0 +1,4 @@
+alter session set sort_area_retained_size = 536870912; 
+alter session set db_file_multiblock_read_count=128;
+create index idx_risk_assess_date on test(risk_assess_date,0) nologging online parallel 8;
+alter index idx_risk_assess_date  noparallel;

@@ -1,0 +1,119 @@
+超大表与超小表关联优化方法
+    现有如下SQL：
+
+select * from a,b where a.object_id=b.object_id;
+
+    表a有30MB，表b有30GB，两表关联后返回大量数据，两表关联返回大量数据应该走hash连接，因为a是小表所以a应该作为hash join的驱动表，大表b作为hash join的被驱动表。在进行hash join的时候，驱动表会被放到pga中，这里，因为驱动表a只有30MB，PGA能够完全容纳下驱动表。因为被驱动表b特别大，想要加快SQL查询速度，必须开启并行查询。超大表与超小表在进行并行hash关联的时候，可以将小表(驱动表)广播到所有的查询进程，然后对大表进行并行随机扫描，每个查询进程查询部分b表数据，然后再进行关联。假设对上面SQL启用6个并行进程，对a表的并行广播，对b表进行随机并行扫描(每部分记为b1,b2,b3,b4,b5,b6)其实就相当于将上面SQL内部等价的改写为下面SQL：
+
+select * from a,b1 where a.object_id=b1.object_id  ---并行进行
+union all
+select * from a,b2 where a.object_id=b2.object_id  ---并行进行
+union all
+select * from a,b3 where a.object_id=b3.object_id  ---并行进行
+union all
+select * from a,b4 where a.object_id=b4.object_id  ---并行进行
+union all
+select * from a,b5 where a.object_id=b5.object_id  ---并行进行
+union all
+select * from a,b6 where a.object_id=b6.object_id; ---并行进行
+
+    怎么才能让a表进行广播呢，需要添加hint：pq_distribute(驱动表 none,broadcast)。  
+    现在来查看a表并行广播的执行计划(为了方便排版，执行计划中省略了部分数据)：
+
+SQL> explain plan for select
+ /*+ parallel(6) use_hash(a,b) pq_distribute(a none,broadcast) */
+  2   *
+  3    from a, b
+  4   where a.object_id = b.object_id;
+
+Explained.
+
+SQL> select * from table(dbms_xplan.display);
+
+PLAN_TABLE_OUTPUT
+-----------------------------------------------------------------------------------
+Plan hash value: 3536517442
+--------------------------------------------------------------------------------
+| Id  | Operation               | Name     | Rows  | Bytes |IN-OUT| PQ Distrib |
+--------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT        |          |  5064K|  1999M|      |    |
+|   1 |  PX COORDINATOR         |          |       |       |      |    |
+|   2 |   PX SEND QC (RANDOM)   | :TQ10001 |  5064K|  1999M| P->S | QC (RAND)  |
+|*  3 |    HASH JOIN            |          |  5064K|  1999M| PCWP |    |
+|   4 |     PX RECEIVE          |          | 74893 |    14M| PCWP |    |
+|   5 |      PX SEND BROADCAST  | :TQ10000 | 74893 |    14M| P->P | BROADCAST  |
+|   6 |       PX BLOCK ITERATOR |          | 74893 |    14M| PCWC |    |
+|   7 |        TABLE ACCESS FULL| A        | 74893 |    14M| PCWP |    |
+|   8 |     PX BLOCK ITERATOR   |          |  5064K|   999M| PCWC |    |
+|   9 |      TABLE ACCESS FULL  | B        |  5064K|   999M| PCWP |    |
+--------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   3 - access("A"."OBJECT_ID"="B"."OBJECT_ID")
+
+    如果小表进行了广播，执行计划Operation会出现PX SEND BROADCAST关键字，PQ Distrib会出现BROADCAST关键字。注意，如果是两个大表关联，千万不能让大表广播。
+
+================================================================================================================    
+
+
+超大表与超大表关联优化方法
+    现有如下SQL：
+
+select * from a,b where a.object_id=b.object_id;
+
+    表a有4GB，表b有6GB，两表关联后返回大量数据。两表关联返回大量数据应该走HASH连接。因为a比b小，所以a表应该作为hash join的驱动表。早期的Oracle版本，单个进程最大PGA不能超过2G，现在单个进程最大PGA可以达到16G，但是需要修改操作系统参数和Oracle参数。在这里，先设定单个进程PGA不能超过2G。驱动表a有4GB，需要放入PGA中，因为PGA不能超过2G，所以PGA不能完全容纳下驱动表，这时有部分数据会溢出到磁盘(temp)进行on-disk hash join。可以开启并行查询加快查询速度。超大表与超大表在进行并行hash连接的时候，需要将2个表根据连接列进行hash运算，然后将运算结果放到PGA中，然后再进行hash连接，这种并行hash连接就叫做并行hash hash连接。需要特别注意的是，这时2个表都需要放到PGA中。假设对上面SQL启用6个并行查询，a表会根据连接列进行hash运算然后拆分为6份，记为a1，a2，a3，a4，a5，a6，b表也会根据连接列进行hash运算然后拆分为6份，记为b1，b2，b3，b4，b5，b6。那么上面SQL开启并行就相当于被改写成如下SQL：
+
+select * from a1,b1 where a1.object_id=b1.object_id  ---并行进行
+union all
+select * from a2,b2 where a2.object_id=b2.object_id  ---并行进行
+union all
+select * from a3,b3 where a3.object_id=b3.object_id  ---并行进行
+union all
+select * from a4,b4 where a4.object_id=b4.object_id  ---并行进行
+union all
+select * from a5,b5 where a5.object_id=b5.object_id  ---并行进行
+union all
+select * from a6,b6 where a6.object_id=b6.object_id; ---并行进行
+
+    对于上面SQL，开启并行查询就能避免on-disk hash join，因为表不是特别大，并且表被拆分到内存中了。怎么写HINT实现并行hash hash呢？需要添加hint：pq_distribute(被驱动表 hash,hash)。
+    现在来查看并行hash hash的执行计划(为了方便排版，执行计划中省略了部分数据)：
+
+SQL> explain plan for select 
+/*+ parallel(6) use_hash(a,b) pq_distribute(b hash,hash) */
+  2   *
+  3    from a, b
+  4   where a.object_id = b.object_id;
+
+Explained.
+
+SQL> select * from table(dbms_xplan.display);
+
+PLAN_TABLE_OUTPUT
+--------------------------------------------------------------------------------------------
+Plan hash value: 728916813
+----------------------------------------------------------------------------------------
+| Id  | Operation               | Name     | Rows  | Bytes |TempSpc|IN-OUT| PQ Distrib |
+----------------------------------------------------------------------------------------
+|   0 | SELECT STATEMENT        |          |  3046M|  1174G|       |      |            |
+|   1 |  PX COORDINATOR         |          |       |       |       |      |            |
+|   2 |   PX SEND QC (RANDOM)   | :TQ10002 |  3046M|  1174G|       | P->S | QC (RAND)  |
+|*  3 |    HASH JOIN BUFFERED   |          |  3046M|  1174G|   324M| PCWP |            |
+|   4 |     PX RECEIVE          |          |  9323K|  1840M|       | PCWP |            |
+|   5 |      PX SEND HASH       | :TQ10000 |  9323K|  1840M|       | P->P | HASH       |
+|   6 |       PX BLOCK ITERATOR |          |  9323K|  1840M|       | PCWC |            |
+|   7 |        TABLE ACCESS FULL| A        |  9323K|  1840M|       | PCWP |            |
+|   8 |     PX RECEIVE          |          |    20M|  4045M|       | PCWP |            |
+|   9 |      PX SEND HASH       | :TQ10001 |    20M|  4045M|       | P->P | HASH       |
+|  10 |       PX BLOCK ITERATOR |          |    20M|  4045M|       | PCWC |            |
+|  11 |        TABLE ACCESS FULL| B        |    20M|  4045M|       | PCWP |            |
+----------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+---------------------------------------------------
+
+   3 - access("A"."OBJECT_ID"="B"."OBJECT_ID")
+
+    两表如果进行的是并行hash hash关联，执行计划Operation会出现PX SEND HASH关键字，PQ Distrib会出现HASH关键字。
+    如果表a有20G，表b有30G，即使采用并行hash hash连接也很难跑出结果，因为要把2个表先映射到PGA中，这需要耗费一部分PGA，之后在进行hash join的时候也需要部分PGA，此时PGA根本就不够用，如果查看等待事件，会发现进程一直在做direct path read/write temp。
